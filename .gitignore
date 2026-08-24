@@ -1,0 +1,10 @@
+# artefatos de build do arduino-cli / Arduino IDE
+build/
+*.bin
+*.elf
+*.map
+*.hex
+
+# lixo de sistema
+.DS_Store
+Thumbs.db
