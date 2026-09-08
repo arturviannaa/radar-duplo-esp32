@@ -131,6 +131,9 @@ arduino-cli upload  --fqbn esp32:esp32:esp32 -p /dev/ttyUSB0 radar_duplo
 Pela Arduino IDE: abra `radar_duplo/radar_duplo.ino`, selecione a placa
 **ESP32 Dev Module** e a porta correspondente.
 
+Pra debug, abra o Serial Monitor em **115200 baud** — é a taxa configurada em
+`Serial.begin()` no sketch.
+
 ---
 
 ## Calibragem
