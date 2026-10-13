@@ -2,9 +2,16 @@
 
 Sensor de estacionamento (radar) visual. Lê a distância de dois sensores
 ultrassônicos independentes e desenha barras de proximidade dinâmicas e
-coloridas numa tela TFT de 2.8".
+coloridas numa tela TFT de 2.8". Opcionalmente publica as leituras por MQTT
+para uma stack FIWARE (IoT Agent JSON + Orion Context Broker).
 
 Projeto acadêmico, desenvolvido para fins de estudo.
+
+## Integrantes
+
+- Artur Figueiredo Vianna
+- Cassiano Rocha Assumpção
+- Pedro Perraro John
 
 ---
 
@@ -117,9 +124,38 @@ Instale pela Library Manager da Arduino IDE, ou via `arduino-cli`:
 arduino-cli core install esp32:esp32
 arduino-cli lib install "Adafruit GFX Library"
 arduino-cli lib install "Adafruit ST7735 and ST7789 Library"
+arduino-cli lib install "PubSubClient"
 ```
 
+> `PubSubClient` é o cliente MQTT. Se você não vai usar a parte FIWARE, pode
+> instalar mesmo assim: o sketch continua funcionando offline (ver abaixo).
+
 ---
+
+## Configuração local (WiFi + MQTT)
+
+Antes de compilar, copie o template de credenciais e preencha com os valores
+da sua rede e do seu backend FIWARE:
+
+```bash
+cp radar_duplo/secrets.h.example radar_duplo/secrets.h
+```
+
+Edite `radar_duplo/secrets.h`:
+
+```c
+#define WIFI_SSID       "sua-rede"
+#define WIFI_PASSWORD   "sua-senha"
+#define MQTT_HOST       "192.168.0.100"   // IP da maquina que roda o docker-compose
+#define MQTT_PORT       1883
+#define FIWARE_APIKEY   "radar123"
+#define FIWARE_DEVICE   "radar001"
+```
+
+O arquivo `secrets.h` fica fora do git (listado no `.gitignore`), para não
+vazar credenciais. Se a rede WiFi não estiver disponível no boot, o sketch
+registra o erro no Serial e continua rodando offline — a tela segue
+funcionando normalmente.
 
 ## Compilar e gravar
 
@@ -163,15 +199,94 @@ Ajuste `tft.invertDisplay(true)` se as cores do seu painel saírem invertidas �
 | Cores invertidas | Troque `tft.invertDisplay(false)` por `true`. |
 | Erro de upload `No more data to read from the serial port` | Outro processo está segurando `/dev/ttyUSB0`. Cheque com `fuser -v /dev/ttyUSB0` e feche o monitor serial. |
 | Leituras instáveis com os dois sensores | Aumente o `delay(50)` entre as duas leituras, para o eco de um não ser captado pelo outro. |
+| `MQTT: falha rc=-2` no Serial | O ESP32 não alcança o broker. Verifique se `MQTT_HOST` em `secrets.h` é o IP (não `localhost`) da máquina do Docker, e se ela está na mesma rede do ESP32. |
+| Entidade não aparece no Orion | Confira se `./provision.sh` rodou sem erros e se o `FIWARE_APIKEY` do `secrets.h` bate com o do script. |
 
 ---
+
+## Integração FIWARE + MQTT
+
+A stack em `fiware/` sobe tudo que o ESP32 precisa para alimentar o
+**Orion Context Broker** com as leituras dos radares, usando o
+**IoT Agent JSON** como tradutor MQTT ⇄ NGSI.
+
+```
+ESP32 ──MQTT──> Mosquitto ──MQTT──> IoT Agent JSON ──NGSI──> Orion
+                                                               │
+                                                   consultas HTTP (REST)
+```
+
+### Subir a stack
+
+Pré-requisito: Docker e Docker Compose. Numa máquina acessível pelo ESP32
+(normalmente na mesma rede WiFi):
+
+```bash
+cd fiware
+docker compose up -d
+./provision.sh      # cria service group e provisiona o device "radar001"
+```
+
+Portas expostas:
+
+| Porta | Serviço | Para quê |
+|-------|---------|----------|
+| `1883` | Mosquitto (MQTT) | O ESP32 publica aqui. |
+| `1026` | Orion NGSI v2 | Consultar o estado atual dos radares. |
+| `4041` | IoT Agent (admin) | Provisionar devices e service groups. |
+
+### Mapeamento das leituras
+
+O sketch publica no tópico `/json/<APIKEY>/<DEVICE>/attrs`:
+
+```json
+{"d1": 42, "d2": 87}
+```
+
+O IoT Agent (configurado em `provision.sh`) traduz `d1`/`d2` nos atributos
+`distanciaEsquerda` e `distanciaDireita` da entidade NGSI
+`urn:ngsi-ld:Radar:radar001`.
+
+### Verificar que chegou no Orion
+
+```bash
+curl -s http://localhost:1026/v2/entities/urn:ngsi-ld:Radar:radar001 \
+  -H 'fiware-service: radar' \
+  -H 'fiware-servicepath: /' | jq
+```
+
+Resposta esperada (resumida):
+
+```json
+{
+  "id": "urn:ngsi-ld:Radar:radar001",
+  "type": "Radar",
+  "distanciaEsquerda": { "type": "Number", "value": 42 },
+  "distanciaDireita":  { "type": "Number", "value": 87 }
+}
+```
+
+Para debugar o fluxo MQTT, escute o tópico com `mosquitto_sub`:
+
+```bash
+mosquitto_sub -h localhost -t '/json/radar123/radar001/attrs' -v
+```
+
+> ⚠️ A `mosquitto.conf` aceita conexões anônimas — é adequado para o
+> laboratório mas não para produção. Para expor na internet, configure
+> usuários, TLS e um firewall na frente do broker.
 
 ## Estrutura
 
 ```
 radar-duplo-esp32/
 ├── radar_duplo/
-│   └── radar_duplo.ino    # sketch completo
+│   ├── radar_duplo.ino      # sketch completo
+│   └── secrets.h.example    # template de credenciais WiFi/MQTT
+├── fiware/
+│   ├── docker-compose.yml   # Orion + IoT Agent JSON + Mosquitto + MongoDB
+│   ├── mosquitto.conf       # config do broker MQTT
+│   └── provision.sh         # cria service group e provisiona o device
 ├── README.md
 ├── LICENSE
 └── .gitignore

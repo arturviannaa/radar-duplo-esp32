@@ -1,7 +1,11 @@
 // Monitor de radar duplo: dois HC-SR04 -> barras de proximidade numa TFT ST7789.
+// Opcionalmente publica as distancias por MQTT para o IoT Agent JSON do FIWARE.
 #include <SPI.h>
 #include <Adafruit_GFX.h>
 #include <Adafruit_ST7789.h>
+#include <WiFi.h>
+#include <PubSubClient.h>
+#include "secrets.h"
 
 // --- sensores ---
 const int trigPin1 = 23;   // sensor da direita
@@ -25,8 +29,68 @@ const unsigned long ECHO_TIMEOUT = 25000UL;   // us (~4 m ida e volta)
 const int LIMITE_VERMELHO = 20;               // cm
 const int LIMITE_AMARELO  = 50;               // cm
 
+// --- MQTT ---
+// Intervalo entre publicacoes. O loop le/desenha varias vezes por segundo,
+// mas o broker nao precisa receber tudo isso: 1 s basta para o Orion.
+const unsigned long MQTT_INTERVALO_MS = 1000;
+
 SPIClass hspi(HSPI);
 Adafruit_ST7789 tft = Adafruit_ST7789(&hspi, TFT_CS, TFT_DC, TFT_RST);
+
+WiFiClient wifiClient;
+PubSubClient mqtt(wifiClient);
+
+// Topico do IoT Agent JSON (sintaxe fixada pelo agente):
+//   /json/<API_KEY>/<DEVICE_ID>/attrs
+String topicoAttrs = String("/json/") + FIWARE_APIKEY + "/" + FIWARE_DEVICE + "/attrs";
+
+unsigned long ultimaPublicacao = 0;
+
+void conectarWiFi() {
+  WiFi.mode(WIFI_STA);
+  WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
+  Serial.print("WiFi: conectando a ");
+  Serial.print(WIFI_SSID);
+  // Timeout curto: se a rede nao estiver disponivel, seguimos offline
+  // e o display continua funcionando normalmente.
+  unsigned long inicio = millis();
+  while (WiFi.status() != WL_CONNECTED && millis() - inicio < 10000) {
+    delay(250);
+    Serial.print(".");
+  }
+  if (WiFi.status() == WL_CONNECTED) {
+    Serial.print(" ok, IP ");
+    Serial.println(WiFi.localIP());
+  } else {
+    Serial.println(" falhou (segue offline)");
+  }
+}
+
+void garantirMqtt() {
+  if (WiFi.status() != WL_CONNECTED) return;
+  if (mqtt.connected()) return;
+
+  mqtt.setServer(MQTT_HOST, MQTT_PORT);
+  String clientId = String("esp32-") + FIWARE_DEVICE;
+  if (mqtt.connect(clientId.c_str())) {
+    Serial.print("MQTT: conectado em ");
+    Serial.print(MQTT_HOST);
+    Serial.print(" como ");
+    Serial.println(clientId);
+  } else {
+    Serial.print("MQTT: falha rc=");
+    Serial.println(mqtt.state());
+  }
+}
+
+void publicarDistancias(long esq, long dir) {
+  if (!mqtt.connected()) return;
+  // Nomes curtos (d1/d2) sao os "object_id" do provisionamento no IoT Agent;
+  // la viram atributos "distanciaEsquerda" / "distanciaDireita" no Orion.
+  char payload[64];
+  snprintf(payload, sizeof(payload), "{\"d1\":%ld,\"d2\":%ld}", esq, dir);
+  mqtt.publish(topicoAttrs.c_str(), payload);
+}
 
 void setup() {
   Serial.begin(115200);
@@ -53,6 +117,9 @@ void setup() {
   tft.print("ESQ:");
   tft.setCursor(15, 155);
   tft.print("DIR:");
+
+  conectarWiFi();
+  mqtt.setServer(MQTT_HOST, MQTT_PORT);
 }
 
 long lerDistancia(int pinoTrig, int pinoEcho) {
@@ -102,6 +169,15 @@ void loop() {
 
   desenharBarra(80, 55, distEsquerda);
   desenharBarra(80, 145, distDireita);
+
+  garantirMqtt();
+  mqtt.loop();
+
+  unsigned long agora = millis();
+  if (agora - ultimaPublicacao >= MQTT_INTERVALO_MS) {
+    publicarDistancias(distEsquerda, distDireita);
+    ultimaPublicacao = agora;
+  }
 
   delay(100);
 }

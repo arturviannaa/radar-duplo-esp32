@@ -8,3 +8,6 @@ build/
 # lixo de sistema
 .DS_Store
 Thumbs.db
+
+# credenciais locais do sketch (WiFi/MQTT) — ver secrets.h.example
+radar_duplo/secrets.h
